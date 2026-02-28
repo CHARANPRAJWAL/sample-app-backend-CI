@@ -1,0 +1,101 @@
+name: Local CI/CD (GHCR)
+
+on:
+  workflow_dispatch:           # Manual trigger only — keeps free-tier minutes under control
+    inputs:
+      environment:
+        description: 'Target environment'
+        default: 'local'
+        type: choice
+        options:
+          - local
+
+permissions:
+  contents: read
+  packages: write              # GHCR push
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/backend-api
+
+jobs:
+  build-and-push:
+    name: Build, Push to GHCR & Update CD
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run tests
+        run: npm run test
+        continue-on-error: true
+
+      # ── GHCR Authentication ──
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build & Push ──
+      - name: Generate image tag
+        id: tag
+        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image to GHCR
+        run: |
+          docker build \
+            --tag ${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.sha }} \
+            --tag ${{ env.GHCR_IMAGE }}:latest \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --file Dockerfile \
+            .
+          docker push ${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.sha }}
+          docker push ${{ env.GHCR_IMAGE }}:latest
+
+      # ── Update CD Repo ──
+      - name: Update image tag in CD repo
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          IMAGE_TAG: ${{ steps.tag.outputs.sha }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          git clone git@github.com:${{ github.repository_owner }}/gitops-deploy.git /tmp/gitops-deploy
+          cd /tmp/gitops-deploy
+
+          sed -i "s|tag:.*|tag: \"${IMAGE_TAG}\"|" charts/backend/values-local.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/backend/values-local.yaml
+          git commit -m "chore(backend-local): update image tag to ${IMAGE_TAG}
+
+          Source commit: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          Triggered by: ${{ github.actor }}"
+          git push
+
+          rm -rf ~/.ssh/deploy_key

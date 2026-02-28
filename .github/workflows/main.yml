@@ -1,0 +1,100 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+jobs:
+  build-and-push:
+    name: Build, Push & Update CD
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run tests
+        run: npm run test
+        continue-on-error: true
+
+      # ── AWS Authentication via OIDC ──
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build & Push ──
+      - name: Generate image tag
+        id: tag
+        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            --tag ${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.sha }} \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --file Dockerfile \
+            .
+          docker push ${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.sha }}
+
+      # ── Update CD Repo ──
+      - name: Update image tag in CD repo
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          IMAGE_TAG: ${{ steps.tag.outputs.sha }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          git clone git@github.com:${{ github.repository_owner }}/gitops-deploy.git /tmp/gitops-deploy
+          cd /tmp/gitops-deploy
+
+          sed -i "s|tag:.*|tag: \"${IMAGE_TAG}\"|" charts/backend/values-production.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/backend/values-production.yaml
+          git commit -m "chore(backend): update image tag to ${IMAGE_TAG}
+
+          Source commit: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          Triggered by: ${{ github.actor }}"
+          git push
+
+          rm -rf ~/.ssh/deploy_key

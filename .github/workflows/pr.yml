@@ -1,0 +1,64 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  validate:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true   # Remove once lint script is added to package.json
+
+      - name: Run tests
+        run: npm run test
+        continue-on-error: true   # Remove once test script is added to package.json
+
+      - name: Build Docker image (no push)
+        run: |
+          docker build \
+            --tag backend-api:pr-${{ github.event.pull_request.number }} \
+            --file Dockerfile \
+            .
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'backend-api:pr-${{ github.event.pull_request.number }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
