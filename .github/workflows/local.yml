@@ -14,9 +14,6 @@ permissions:
   contents: read
   packages: write              # GHCR push
 
-env:
-  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/backend-api
-
 jobs:
   build-and-push:
     name: Build, Push to GHCR & Update CD
@@ -26,6 +23,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set lowercase owner
+        run: echo "GHCR_IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/backend-api" >> $GITHUB_ENV
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
