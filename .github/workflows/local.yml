@@ -1,7 +1,7 @@
 name: Local CI/CD (GHCR)
 
 on:
-  workflow_dispatch:           # Manual trigger only — keeps free-tier minutes under control
+  workflow_dispatch: # Manual trigger only — keeps free-tier minutes under control
     inputs:
       environment:
         description: 'Target environment'
@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: read
-  packages: write              # GHCR push
+  packages: write # GHCR push
 
 jobs:
   build-and-push:
@@ -84,8 +84,8 @@ jobs:
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
 
-          git clone git@github.com:${{ github.repository_owner }}/gitops-deploy.git /tmp/gitops-deploy
-          cd /tmp/gitops-deploy
+          git clone git@github.com:${{ github.repository_owner }}/gitops-deploy-CD.git /tmp/gitops-deploy-CD
+          cd /tmp/gitops-deploy-CD
 
           sed -i "s|tag:.*|tag: \"${IMAGE_TAG}\"|" charts/backend/values-local.yaml
 
